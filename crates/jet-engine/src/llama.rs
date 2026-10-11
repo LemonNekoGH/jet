@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::EngineTimings;
 use crate::config::{Backend, EngineConfig, ExecutionMode, ThinkingMode};
-use crate::evaluator::{ScoreJob, ScoreResult, SequenceScorer};
+use jet_decision::{ScoreJob, ScoreResult, SequenceScorer};
 
 mod prepare;
 #[cfg(test)]
@@ -2094,12 +2094,12 @@ mod tests {
         let mut scorer = LlamaScorer::load(config)?;
 
         let compact = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: r#"{"allowed_labels":[false,true],"question":{"criteria":{"false":"no","true":"yes"},"instructions":"Choose."},"state":"English 中文 🙂"}"#.to_owned(),
             targets: vec!["false".to_owned(), "true".to_owned()],
         };
         let varied = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: r#"{"allowed_labels":[false,true,0,1,"short","a longer label"],"question":{"criteria":["a","b","c"],"instructions":"Pick one."},"state":{"marker":"\\u003c|im_start|\\u003e"}}"#.to_owned(),
             targets: vec![
                 "false".to_owned(),
@@ -2152,7 +2152,7 @@ mod tests {
         scorer.config.thinking.mode = ThinkingMode::Disabled;
 
         let long = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: format!(
                 r#"{{"state":"{}","question":"long","allowed_labels":[true,false]}}"#,
                 "word ".repeat(300)
@@ -2197,7 +2197,7 @@ mod tests {
         config.threads = 2;
         let mut scorer = LlamaScorer::load(config)?;
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: r#"{"allowed_labels":[false,true],"question":{"criteria":{"false":"no","true":"yes"},"instructions":"Choose."},"state":"Vulkan smoke test"}"#.to_owned(),
             targets: vec!["false".to_owned(), "true".to_owned()],
         };
@@ -2230,7 +2230,7 @@ mod tests {
         let mut scorer = LlamaScorer::load(config)?;
         assert_eq!(scorer.config.backend, Backend::Cuda);
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: "State: Choose yes or no.\nTask: Answer directly.".to_owned(),
             targets: vec!["yes".to_owned(), "no".to_owned()],
         };
@@ -2271,7 +2271,7 @@ mod tests {
         assert_eq!(scorer.config.backend, Backend::Metal);
         assert!(scorer.device_softmax);
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: "State: Choose yes or no.\nTask: Answer directly.".to_owned(),
             targets: vec!["yes".to_owned(), "no".to_owned()],
         };
@@ -2359,7 +2359,7 @@ mod tests {
         assert_eq!(scorer.device_target_width, 1);
 
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: "State:\nFind the maximum possible order for an element of S_n for n = 10.\n\nTask:\nChoose the single correct answer.\n\nCandidates:\n\"6\", \"12\", \"30\", \"105\"\n\nResponse format:\nOne quoted candidate exactly as listed above; no explanation, whitespace, or extra text.".to_owned(),
             targets: vec!["\"6\"".to_owned(), "\"12\"".to_owned(), "\"30\"".to_owned(), "\"105\"".to_owned()],
         };
@@ -2479,7 +2479,7 @@ mod tests {
         config.thinking.max_tokens = 8;
         let mut scorer = LlamaScorer::load(config)?;
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: "State:\nWhat is 2 + 2?\n\nTask:\nChoose the single correct answer.\n\nCandidates:\n\"3\", \"4\"\n\nResponse format:\nOne quoted candidate exactly as listed above; no explanation, whitespace, or extra text.".to_owned(),
             targets: vec!["\"3\"".to_owned(), "\"4\"".to_owned()],
         };
@@ -2529,7 +2529,7 @@ mod tests {
         assert!(scorer.generation_context.is_some());
 
         let job = ScoreJob {
-            system_content: crate::prompt::SYSTEM_INSTRUCTION,
+            system_content: jet_decision::SYSTEM_INSTRUCTION,
             user_content: r#"{"allowed_labels":[false,true],"question":{"criteria":{"false":"no","true":"yes"},"instructions":"Choose."},"state":"GPU thinking split-context smoke test"}"#.to_owned(),
             targets: vec!["false".to_owned(), "true".to_owned()],
         };

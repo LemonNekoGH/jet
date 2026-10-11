@@ -33,7 +33,7 @@ impl Drop for VocabularyModel {
 
 fn fixture() -> ScoreJob {
     ScoreJob {
-        system_content: crate::prompt::SYSTEM_INSTRUCTION,
+        system_content: jet_decision::SYSTEM_INSTRUCTION,
         user_content: "Choose a description: English 中文 🙂. Is the sky usually blue?".to_owned(),
         targets: vec!["\"yes\"".to_owned(), "\"no\"".to_owned()],
     }

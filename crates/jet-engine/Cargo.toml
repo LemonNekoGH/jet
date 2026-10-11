@@ -15,10 +15,10 @@ vision = ["jet-llama-sys/vision"]
 
 [dependencies]
 jet-core.workspace = true
+jet-decision.workspace = true
 jet-llama-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tera.workspace = true
 tracing.workspace = true
 
 [lints]

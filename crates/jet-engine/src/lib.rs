@@ -1,7 +1,5 @@
 mod config;
-mod evaluator;
 mod llama;
-mod prompt;
 mod timing;
 #[cfg(feature = "vision")]
 mod vision;
@@ -9,7 +7,7 @@ mod vision;
 #[cfg(feature = "vision")]
 pub use config::VisionConfig;
 pub use config::{Backend, EngineConfig, ExecutionMode, ThinkingConfig, ThinkingMode};
-pub use prompt::{
+pub use jet_decision::{
     ExportedPrompts, ExportedQuestion, PromptCandidate, PromptMessage, export_prompts,
 };
 pub use timing::EngineTimings;
@@ -20,7 +18,7 @@ pub use vision::{
 
 use jet_core::{DecisionRequest, DecisionResponse, JetError, Result};
 
-use evaluator::decide_batch;
+use jet_decision::decide_batch;
 use llama::LlamaScorer;
 
 pub struct Engine {

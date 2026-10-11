@@ -1,0 +1,23 @@
+{
+  "name": "jet-web-playground",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "3.6.0-rc.11"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.10",
+    "@types/node": "25.9.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vue-tsc": "3.3.13"
+  },
+  "packageManager": "pnpm@10.18.3"
+}

@@ -1,5 +1,8 @@
 /target/
 /dist/
+/playground/dist/
+/playground/generated/
+/playground/node_modules/
 /models/
 /tests/accuracy/data/
 /tests/accuracy/generated*/
