@@ -47,7 +47,7 @@ export async function loadModel(
   );
   await nextModel.loadModelFromUrl(modelUrl, {
     n_ctx: 4096,
-    n_parallel: 9,
+    n_parallel: 8,
     n_gpu_layers: 99999,
     progressCallback: onProgress,
   });

@@ -40,7 +40,7 @@ index 9b338ce..c716494 100644
  {
    GLUE_HANDLER("gres_req")
 diff --git a/cpp/wllama-context.h b/cpp/wllama-context.h
-index a112f59..7b8c44f 100644
+index a112f59..0d1180b 100644
 --- a/cpp/wllama-context.h
 +++ b/cpp/wllama-context.h
 @@ -7,6 +7,7 @@
@@ -256,7 +256,7 @@ index a112f59..7b8c44f 100644
      decision.init(model);
      auto metadata = dump_metadata();
  
-@@ -813,6 +994,431 @@ struct wllama_context
+@@ -813,6 +994,494 @@ struct wllama_context
      return res;
    }
  
@@ -382,8 +382,48 @@ index a112f59..7b8c44f 100644
 +    {
 +      throw app_exception("scoreKnownTextBatch requires at least two sequences");
 +    }
++    size_t shared_prefix_length = 0;
++    if (groups.size() > 1 && max_sequences >= 3)
++    {
++      size_t shortest_prompt = groups.front().prompt.size();
++      for (const auto &group : groups)
++        shortest_prompt = std::min(shortest_prompt, group.prompt.size());
++      // Leave at least one token in every per-group suffix. Its logits score the
++      // first target token, while the preceding common tokens are evaluated once.
++      const size_t common_limit = shortest_prompt > 0 ? shortest_prompt - 1 : 0;
++      while (shared_prefix_length < common_limit)
++      {
++        const llama_token token = groups.front().prompt[shared_prefix_length];
++        bool matches = true;
++        for (size_t group_index = 1; group_index < groups.size(); group_index++)
++        {
++          if (groups[group_index].prompt[shared_prefix_length] != token)
++          {
++            matches = false;
++            break;
++          }
++        }
++        if (!matches)
++          break;
++        shared_prefix_length++;
++      }
++      // A shared root consumes one sequence. Avoid splitting unusually wide
++      // candidate sets just to reuse a tiny prefix.
++      const size_t shared_candidate_capacity = max_sequences - 2;
++      for (const auto &group : groups)
++      {
++        if (group.targets.size() > shared_candidate_capacity)
++        {
++          shared_prefix_length = 0;
++          break;
++        }
++      }
++      if (shared_prefix_length < 8)
++        shared_prefix_length = 0;
++    }
++    const bool share_prompt_prefix = shared_prefix_length > 0;
 +    const bool isolate_candidates = llama_model_is_recurrent(model) || llama_model_is_hybrid(model);
-+    const size_t candidate_capacity = isolate_candidates ? 1 : max_sequences - 1;
++    const size_t candidate_capacity = isolate_candidates ? 1 : max_sequences - 1 - (share_prompt_prefix ? 1 : 0);
 +    std::vector<group_spec> specs;
 +    for (size_t group_index = 0; group_index < groups.size(); group_index++)
 +    {
@@ -410,7 +450,7 @@ index a112f59..7b8c44f 100644
 +
 +    std::vector<std::vector<group_spec>> waves;
 +    std::vector<group_spec> wave;
-+    size_t wave_sequences = 0;
++    size_t wave_sequences = share_prompt_prefix ? 1 : 0;
 +    size_t wave_cells = 0;
 +    for (const auto &spec : specs)
 +    {
@@ -420,7 +460,7 @@ index a112f59..7b8c44f 100644
 +      {
 +        waves.push_back(std::move(wave));
 +        wave = {};
-+        wave_sequences = 0;
++        wave_sequences = share_prompt_prefix ? 1 : 0;
 +        wave_cells = 0;
 +      }
 +      wave.push_back(spec);
@@ -560,9 +600,18 @@ index a112f59..7b8c44f 100644
 +      ~memory_guard() { llama_memory_clear(memory, true); }
 +    } guard{memory};
 +
++    if (share_prompt_prefix)
++    {
++      std::vector<decode_item> shared_items;
++      shared_items.reserve(shared_prefix_length);
++      for (size_t index = 0; index < shared_prefix_length; index++)
++        shared_items.push_back({groups.front().prompt[index], static_cast<llama_pos>(index), 0, {}});
++      decode_items(shared_items);
++    }
++
 +    for (const auto &current_wave : waves)
 +    {
-+      llama_seq_id next_sequence = 0;
++      llama_seq_id next_sequence = share_prompt_prefix ? 1 : 0;
 +      std::vector<active_group> active_groups;
 +      active_groups.reserve(current_wave.size());
 +      for (const auto &spec : current_wave)
@@ -576,11 +625,17 @@ index a112f59..7b8c44f 100644
 +        prefill_counts[spec.group_index]++;
 +      }
 +
++      if (share_prompt_prefix)
++      {
++        for (const auto &active : active_groups)
++          llama_memory_seq_cp(memory, 0, active.prefix_sequence, 0, static_cast<llama_pos>(shared_prefix_length));
++      }
++
 +      std::vector<decode_item> prompt_items;
 +      for (const auto &active : active_groups)
 +      {
 +        const auto &prompt = groups[active.spec.group_index].prompt;
-+        for (size_t index = 0; index < prompt.size(); index++)
++        for (size_t index = shared_prefix_length; index < prompt.size(); index++)
 +        {
 +          output_action output;
 +          if (index + 1 == prompt.size())
@@ -623,7 +678,15 @@ index a112f59..7b8c44f 100644
 +        }
 +      }
 +      decode_items(candidate_items);
-+      llama_memory_clear(memory, true);
++      if (share_prompt_prefix)
++      {
++        for (llama_seq_id sequence = 1; static_cast<size_t>(sequence) < max_sequences; sequence++)
++          llama_memory_seq_rm(memory, sequence, -1, -1);
++      }
++      else
++      {
++        llama_memory_clear(memory, true);
++      }
 +    }
 +
 +    json group_results = json::array();

@@ -1,0 +1,170 @@
+diff --git a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
+index d4cc0258c..0f8dd1e5b 100644
+--- a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
++++ b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
+@@ -2877,8 +2877,15 @@ class ggml_webgpu_shader_lib {
+     }
+ 
+     webgpu_pipeline get_flash_attn_pipeline(const ggml_webgpu_shader_lib_context & context, bool kv_overlap) {
++#ifdef __EMSCRIPTEN__
++        // Chromium's experimental f16 subgroup-matrix attention path changes
++        // Jet's probability scores too much. Keep the established attention
++        // shader while using f32 subgroup matrices for general matmul kernels.
++        const bool can_use_subgroup_matrix = false;
++#else
+         const bool can_use_subgroup_matrix = ggml_webgpu_flash_attn_can_use_subgroup_matrix_path(
+             context.supports_subgroup_matrix, context.sg_mat_k, context.sg_mat_n, context.src0, context.src2);
++#endif
+         ggml_webgpu_flash_attn_decisions decisions = {};
+         decisions.use_sg_matrix                    = can_use_subgroup_matrix;
+         decisions.q_tile = decisions.use_sg_matrix ? context.sg_mat_m : GGML_WEBGPU_FLASH_ATTN_TILE_Q_TILE;
+diff --git a/ggml/src/ggml-webgpu/ggml-webgpu.cpp b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+index a7986b9c7..e5df18d2d 100644
+--- a/ggml/src/ggml-webgpu/ggml-webgpu.cpp
++++ b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+@@ -4132,6 +4132,13 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+ 
+     ctx->webgpu_global_ctx->adapter.GetLimits(&ctx->webgpu_global_ctx->capabilities.limits);
+ 
++#ifdef __EMSCRIPTEN__
++    // Emdawn's generated C/C++ headers omit Dawn's experimental subgroup-matrix
++    // feature even when Chromium exposes it. The JavaScript glue maps this local
++    // enum value to "chromium-experimental-subgroup-matrix" before bundling.
++    constexpr auto emscripten_subgroup_matrix_feature = static_cast<wgpu::FeatureName>(0x00050037);
++#endif
++
+     wgpu::AdapterInfo info{};
+ #ifndef __EMSCRIPTEN__
+     wgpu::AdapterPropertiesSubgroupMatrixConfigs subgroup_matrix_configs{};
+@@ -4150,7 +4157,21 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+         wgpu::WGSLLanguageFeatureName::Packed4x8IntegerDotProduct);
+ 
+     bool valid_subgroup_matrix_config = false;
+-#ifndef __EMSCRIPTEN__
++#ifdef __EMSCRIPTEN__
++    // Emdawn cannot expose subgroupMatrixConfigs yet, so only enable the
++    // dimensions verified for Apple's Metal 3 adapter. Other adapters retain
++    // the established WebGPU kernels until their dimensions can be queried.
++    if (std::string(info.vendor) == "apple" && std::string(info.architecture) == "metal-3" &&
++        ctx->webgpu_global_ctx->adapter.HasFeature(emscripten_subgroup_matrix_feature)) {
++        // Chromium exposes the supported configurations through
++        // GPUAdapterInfo.subgroupMatrixConfigs. Apple Metal 3 advertises the
++        // f32 8x8x8 configuration used here.
++        ctx->webgpu_global_ctx->capabilities.sg_mat_m = 8;
++        ctx->webgpu_global_ctx->capabilities.sg_mat_n = 8;
++        ctx->webgpu_global_ctx->capabilities.sg_mat_k = 8;
++        valid_subgroup_matrix_config                  = true;
++    }
++#else
+     // Accept f16 subgroup matrix configurations (square or non-square).
+     // NVIDIA GPUs typically report square configs (e.g. 16x16x16),
+     // while Intel Xe2 GPUs report non-square configs (e.g. 8x16x16).
+@@ -4183,6 +4204,10 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+     if (ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix) {
+         required_features.push_back(wgpu::FeatureName::ChromiumExperimentalSubgroupMatrix);
+     }
++#else
++    if (ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix) {
++        required_features.push_back(emscripten_subgroup_matrix_feature);
++    }
+ #endif
+ 
+     if (ctx->webgpu_global_ctx->capabilities.supports_subgroups) {
+diff --git a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_decls.tmpl b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_decls.tmpl
+index 83f6fa172..984c09bcc 100644
+--- a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_decls.tmpl
++++ b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_decls.tmpl
+@@ -5,14 +5,18 @@
+ #define SRC1 src1
+ #endif
+ 
++#ifndef SHMEM_ELEM_TYPE
++#define SHMEM_ELEM_TYPE f16
++#endif
++
+ #ifdef VEC
+ #define VEC_SIZE 4
+-#define SHMEM_TYPE vec4<f16>
++#define SHMEM_TYPE vec4<SHMEM_ELEM_TYPE>
+ #define DST_TYPE vec4<f32>
+ #define SRC0_TYPE vec4<SRC0_INNER_TYPE>
+ #define SRC1_TYPE vec4<SRC1_INNER_TYPE>
+ 
+-fn store_shmem(val: vec4<f16>, idx: u32) {
++fn store_shmem(val: vec4<SHMEM_ELEM_TYPE>, idx: u32) {
+     shmem[idx] = val.x;
+     shmem[idx + 1] = val.y;
+     shmem[idx + 2] = val.z;
+@@ -22,18 +26,18 @@ fn store_shmem(val: vec4<f16>, idx: u32) {
+ 
+ #ifdef SCALAR
+ #define VEC_SIZE 1
+-#define SHMEM_TYPE f16
++#define SHMEM_TYPE SHMEM_ELEM_TYPE
+ #define DST_TYPE f32
+ #define SRC0_TYPE SRC0_INNER_TYPE
+ #define SRC1_TYPE SRC1_INNER_TYPE
+ 
+-fn store_shmem(val: f16, idx: u32) {
++fn store_shmem(val: SHMEM_ELEM_TYPE, idx: u32) {
+     shmem[idx] = val;
+ }
+ #endif // SCALAR
+ 
+ #define QUANT_SHMEM shmem
+-#define QUANT_OUT_TYPE f16
++#define QUANT_OUT_TYPE SHMEM_ELEM_TYPE
+ #include "quant_inner_loops.tmpl"
+ 
+ #ifdef INIT_SRC0_SHMEM_FLOAT
+diff --git a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_subgroup_matrix.wgsl b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_subgroup_matrix.wgsl
+index 35998a9b0..5261c1cdd 100644
+--- a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_subgroup_matrix.wgsl
++++ b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_subgroup_matrix.wgsl
+@@ -4,6 +4,7 @@ enable subgroups;
+ enable chromium_experimental_subgroup_matrix;
+ 
+ #define DECLARE_BYTE_LOADERS_SRC0
++#define SHMEM_ELEM_TYPE f32
+ #ifdef SRC_OVERLAP
+ #define SRC0 merged_src
+ #define SRC1 merged_src
+@@ -79,7 +80,7 @@ const SG_MAT_ACCUM_SHMEM = SUBGROUP_M * SUBGROUP_MATRIX_M * SUBGROUP_N * SUBGROU
+ // We reuse shmem for accumulation matrices
+ const SHMEM_SIZE = max(TILE_SRC0_SHMEM + TILE_SRC1_SHMEM, SG_MAT_ACCUM_SHMEM);
+ 
+-var<workgroup> shmem: array<f16, SHMEM_SIZE>;
++var<workgroup> shmem: array<SHMEM_ELEM_TYPE, SHMEM_SIZE>;
+ 
+ @compute @workgroup_size(TOTAL_WORKGROUP_SIZE)
+ fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
+@@ -124,7 +125,7 @@ fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
+     let offset_m = wg_m * SUBGROUP_M * SUBGROUP_MATRIX_M * SUBGROUP_MATRIX_M_SIZE;
+     let offset_n = wg_n * SUBGROUP_N * SUBGROUP_MATRIX_N * SUBGROUP_MATRIX_N_SIZE;
+ 
+-    var acc_sg_mat : array<array<subgroup_matrix_result<f16, SUBGROUP_MATRIX_N_SIZE, SUBGROUP_MATRIX_M_SIZE>, SUBGROUP_MATRIX_N>, SUBGROUP_MATRIX_M>;
++    var acc_sg_mat : array<array<subgroup_matrix_result<SHMEM_ELEM_TYPE, SUBGROUP_MATRIX_N_SIZE, SUBGROUP_MATRIX_M_SIZE>, SUBGROUP_MATRIX_N>, SUBGROUP_MATRIX_M>;
+ 
+     for (var k_outer = 0u; k_outer < params.k; k_outer += TILE_K) {
+ 
+@@ -139,9 +140,9 @@ fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
+             for (var k_inner = 0u; k_inner < TILE_K; k_inner += SUBGROUP_MATRIX_K_SIZE) {
+ 
+                 let src0_shmem_idx_base = subgroup_m * SUBGROUP_MATRIX_M * SUBGROUP_MATRIX_M_SIZE * TILE_K + k_inner;
+-                var src0_sg_mats: array<subgroup_matrix_left<f16, SUBGROUP_MATRIX_K_SIZE, SUBGROUP_MATRIX_M_SIZE>, SUBGROUP_MATRIX_M>;
++                var src0_sg_mats: array<subgroup_matrix_left<SHMEM_ELEM_TYPE, SUBGROUP_MATRIX_K_SIZE, SUBGROUP_MATRIX_M_SIZE>, SUBGROUP_MATRIX_M>;
+                 for (var m = 0u; m < SUBGROUP_MATRIX_M; m++) {
+-                    src0_sg_mats[m] = subgroupMatrixLoad<subgroup_matrix_left<f16, SUBGROUP_MATRIX_K_SIZE, SUBGROUP_MATRIX_M_SIZE>>(
++                    src0_sg_mats[m] = subgroupMatrixLoad<subgroup_matrix_left<SHMEM_ELEM_TYPE, SUBGROUP_MATRIX_K_SIZE, SUBGROUP_MATRIX_M_SIZE>>(
+                         &shmem,
+                         src0_shmem_idx_base + m * SUBGROUP_MATRIX_M_SIZE * TILE_K,
+                         false,
+@@ -151,7 +152,7 @@ fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
+ 
+                 let src1_shmem_idx_base = TILE_SRC0_SHMEM + subgroup_n * SUBGROUP_MATRIX_N * SUBGROUP_MATRIX_N_SIZE * TILE_K + k_inner;
+                 for (var n = 0u; n < SUBGROUP_MATRIX_N; n++) {
+-                    let src1_sg_mat = subgroupMatrixLoad<subgroup_matrix_right<f16, SUBGROUP_MATRIX_N_SIZE, SUBGROUP_MATRIX_K_SIZE>>(
++                    let src1_sg_mat = subgroupMatrixLoad<subgroup_matrix_right<SHMEM_ELEM_TYPE, SUBGROUP_MATRIX_N_SIZE, SUBGROUP_MATRIX_K_SIZE>>(
+                         &shmem,
+                         src1_shmem_idx_base + n * SUBGROUP_MATRIX_N_SIZE * TILE_K,
+                         true,
