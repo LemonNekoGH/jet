@@ -1,25 +1,34 @@
 import { LoggerWithoutDebug, Wllama } from '../generated/wllama/index.js';
-import type { ScoreKnownTextBatchParams } from '../generated/wllama/wllama.js';
-import initJetWeb, { decide } from '../generated/jet-web/jet_web.js';
 
 const wllamaWasmUrl = new URL(
   '../generated/wllama/wasm/wllama.wasm',
   import.meta.url,
 ).href;
 
-let jetWebReady: Promise<unknown> | undefined;
 let model: Wllama | undefined;
 let loadedModelUrl: string | undefined;
+let loadedOptions: string | undefined;
 
 export type Progress = {
   loaded: number;
   total: number;
 };
 
-function initializeJetWeb(): Promise<unknown> {
-  jetWebReady ??= initJetWeb();
-  return jetWebReady;
-}
+export type EngineOptions = {
+  contextTokensPerSequence?: number;
+  executionMode?: 'reference' | 'batched';
+  preparationPipeline?: boolean;
+  thinkingMode?: 'disabled' | 'auto' | 'required';
+  thinkingTokens?: number;
+};
+
+const defaultEngineOptions: Required<EngineOptions> = {
+  contextTokensPerSequence: 1024,
+  executionMode: 'batched',
+  preparationPipeline: true,
+  thinkingMode: 'disabled',
+  thinkingTokens: 256,
+};
 
 export function supportsWebGpu(): boolean {
   return 'gpu' in navigator;
@@ -28,32 +37,52 @@ export function supportsWebGpu(): boolean {
 export async function loadModel(
   modelUrl: string,
   onProgress: (progress: Progress) => void,
+  options: EngineOptions = {},
 ): Promise<void> {
   if (!supportsWebGpu()) {
     throw new Error('This browser does not expose WebGPU.');
   }
-  if (model && loadedModelUrl === modelUrl) {
+  const engineOptions = { ...defaultEngineOptions, ...options };
+  const optionsKey = JSON.stringify(engineOptions);
+  if (model && loadedModelUrl === modelUrl && loadedOptions === optionsKey) {
     return;
   }
   if (model) {
     await model.exit();
     model = undefined;
     loadedModelUrl = undefined;
+    loadedOptions = undefined;
   }
 
   const nextModel = new Wllama(
     { default: wllamaWasmUrl },
-    { logger: LoggerWithoutDebug },
+    { logger: LoggerWithoutDebug, suppressNativeLog: true },
   );
-  await nextModel.loadModelFromUrl(modelUrl, {
-    n_ctx: 4096,
-    n_parallel: 8,
-    n_gpu_layers: 99999,
-    progressCallback: onProgress,
-  });
-  await initializeJetWeb();
+  const modelId = decodeURIComponent(modelUrl.split('/').pop() || modelUrl);
+  try {
+    await nextModel.loadModelFromUrl(modelUrl, {
+      jet: {
+        model_id: modelId,
+        context_tokens_per_sequence: engineOptions.contextTokensPerSequence,
+        max_sequences: 9,
+        max_output_rows: 256,
+        preparation_pipeline: engineOptions.preparationPipeline,
+        execution_mode: engineOptions.executionMode,
+        thinking: {
+          mode: engineOptions.thinkingMode,
+          max_tokens: engineOptions.thinkingTokens,
+        },
+        collect_timings: true,
+      },
+      progressCallback: onProgress,
+    });
+  } catch (error) {
+    await nextModel.exit();
+    throw error;
+  }
   model = nextModel;
   loadedModelUrl = modelUrl;
+  loadedOptions = optionsKey;
 }
 
 export function isModelLoaded(modelUrl: string): boolean {
@@ -67,10 +96,32 @@ export async function runDecision(
   if (!model || !isModelLoaded(modelUrl)) {
     throw new Error('Load this model before running Jet.');
   }
-  await initializeJetWeb();
+  return model.jetDecide(request);
+}
 
-  const modelId = decodeURIComponent(modelUrl.split('/').pop() || modelUrl);
-  return decide(modelId, request, (scoreRequest: ScoreKnownTextBatchParams) =>
-    model!.scoreKnownTextBatch(scoreRequest),
-  );
+export async function runDecisionTrace(
+  modelUrl: string,
+  request: unknown,
+): Promise<unknown> {
+  if (!model || !isModelLoaded(modelUrl)) {
+    throw new Error('Load this model before running Jet.');
+  }
+  return model.jetDecideTrace(request);
+}
+
+export async function runDecisionBatch(
+  modelUrl: string,
+  requests: unknown[],
+): Promise<unknown[]> {
+  if (!model || !isModelLoaded(modelUrl)) {
+    throw new Error('Load this model before running Jet.');
+  }
+  return model.jetDecideBatch(requests);
+}
+
+export async function engineTimings(modelUrl: string): Promise<unknown> {
+  if (!model || !isModelLoaded(modelUrl)) {
+    throw new Error('Load this model before reading Jet timings.');
+  }
+  return model.jetTimings();
 }

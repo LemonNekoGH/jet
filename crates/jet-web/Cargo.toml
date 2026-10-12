@@ -7,16 +7,18 @@ license = "Apache-2.0"
 repository = "https://github.com/yet-another-ai/jet"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 jet-core.workspace = true
-jet-decision.workspace = true
-js-sys = "0.3"
 serde.workspace = true
-serde-wasm-bindgen = "0.6"
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
+serde_json.workspace = true
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+jet-engine = { workspace = true, features = ["webgpu", "external-link"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+jet-engine.workspace = true
 
 [lints]
 workspace = true

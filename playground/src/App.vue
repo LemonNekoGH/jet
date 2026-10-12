@@ -2,9 +2,12 @@
 import { computed, ref, watch } from 'vue';
 
 import {
+  engineTimings,
   isModelLoaded,
   loadModel,
   runDecision,
+  runDecisionBatch,
+  runDecisionTrace,
   supportsWebGpu,
 } from './runtime';
 
@@ -37,18 +40,28 @@ const defaultRequest = {
 };
 
 const modelUrl = ref(defaultModelUrl);
+const contextTokens = ref(1024);
+const executionMode = ref<'reference' | 'batched'>('batched');
+const preparationPipeline = ref(true);
+const thinkingMode = ref<'disabled' | 'auto' | 'required'>('disabled');
+const thinkingTokens = ref(256);
 const requestText = ref(JSON.stringify(defaultRequest, null, 2));
 const status = ref(supportsWebGpu() ? 'Model is not loaded.' : 'WebGPU is unavailable.');
 const responseText = ref('');
+const timingsText = ref('');
+const traceText = ref('');
 const errorText = ref('');
 const loading = ref(false);
 const running = ref(false);
 const loaded = ref(false);
 const busy = computed(() => loading.value || running.value);
 
-watch(modelUrl, () => {
-  loaded.value = false;
-});
+watch(
+  [modelUrl, contextTokens, executionMode, preparationPipeline, thinkingMode, thinkingTokens],
+  () => {
+    loaded.value = false;
+  },
+);
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -65,13 +78,25 @@ async function load(): Promise<void> {
   loaded.value = false;
   errorText.value = '';
   responseText.value = '';
+  timingsText.value = '';
+  traceText.value = '';
   status.value = 'Preparing model download…';
 
   try {
-    await loadModel(modelUrl.value, ({ loaded: bytes, total }) => {
-      const percent = total > 0 ? Math.round((bytes / total) * 100) : 0;
-      status.value = `Downloading model: ${percent}% (${bytes} / ${total} bytes)`;
-    });
+    await loadModel(
+      modelUrl.value,
+      ({ loaded: bytes, total }) => {
+        const percent = total > 0 ? Math.round((bytes / total) * 100) : 0;
+        status.value = `Downloading model: ${percent}% (${bytes} / ${total} bytes)`;
+      },
+      {
+        contextTokensPerSequence: contextTokens.value,
+        executionMode: executionMode.value,
+        preparationPipeline: preparationPipeline.value,
+        thinkingMode: thinkingMode.value,
+        thinkingTokens: thinkingTokens.value,
+      },
+    );
     loaded.value = true;
     status.value = 'Model loaded. Jet is ready.';
   } catch (error) {
@@ -86,6 +111,8 @@ async function run(): Promise<void> {
   running.value = true;
   errorText.value = '';
   responseText.value = '';
+  timingsText.value = '';
+  traceText.value = '';
 
   try {
     const request = JSON.parse(requestText.value) as unknown;
@@ -95,10 +122,65 @@ async function run(): Promise<void> {
     status.value = 'Scoring candidates…';
     const response = await runDecision(modelUrl.value, request);
     responseText.value = JSON.stringify(response, null, 2);
+    timingsText.value = JSON.stringify(await engineTimings(modelUrl.value), null, 2);
     status.value = 'Decision complete.';
   } catch (error) {
     errorText.value = errorMessage(error);
     status.value = 'Decision failed.';
+  } finally {
+    running.value = false;
+  }
+}
+
+async function runBatch(): Promise<void> {
+  running.value = true;
+  errorText.value = '';
+  responseText.value = '';
+  timingsText.value = '';
+  traceText.value = '';
+
+  try {
+    const request = JSON.parse(requestText.value) as unknown;
+    if (!isModelLoaded(modelUrl.value)) {
+      throw new Error('Load this model before running Jet.');
+    }
+    status.value = 'Scoring a two-request batch...';
+    const response = await runDecisionBatch(modelUrl.value, [request, request]);
+    responseText.value = JSON.stringify(response, null, 2);
+    timingsText.value = JSON.stringify(await engineTimings(modelUrl.value), null, 2);
+    status.value = 'Batch decision complete.';
+  } catch (error) {
+    errorText.value = errorMessage(error);
+    status.value = 'Batch decision failed.';
+  } finally {
+    running.value = false;
+  }
+}
+
+async function runTrace(): Promise<void> {
+  running.value = true;
+  errorText.value = '';
+  responseText.value = '';
+  timingsText.value = '';
+  traceText.value = '';
+
+  try {
+    const request = JSON.parse(requestText.value) as unknown;
+    if (!isModelLoaded(modelUrl.value)) {
+      throw new Error('Load this model before running Jet.');
+    }
+    status.value = 'Scoring and recording the engine trace...';
+    const result = (await runDecisionTrace(modelUrl.value, request)) as {
+      response: unknown;
+      trace: unknown;
+    };
+    responseText.value = JSON.stringify(result.response, null, 2);
+    traceText.value = JSON.stringify(result.trace, null, 2);
+    timingsText.value = JSON.stringify(await engineTimings(modelUrl.value), null, 2);
+    status.value = 'Trace decision complete.';
+  } catch (error) {
+    errorText.value = errorMessage(error);
+    status.value = 'Trace decision failed.';
   } finally {
     running.value = false;
   }
@@ -121,6 +203,46 @@ async function run(): Promise<void> {
       <button type="button" :disabled="busy" @click="load">
         {{ loading ? 'Loading…' : loaded ? 'Reload model' : 'Load model' }}
       </button>
+      <fieldset :disabled="busy">
+        <legend>EngineConfig</legend>
+        <p>
+          <label for="context-tokens">
+            Context tokens per sequence
+            <input id="context-tokens" v-model.number="contextTokens" type="number" min="128" step="128" />
+          </label>
+        </p>
+        <p>
+          <label for="execution-mode">
+            Execution
+            <select id="execution-mode" v-model="executionMode">
+              <option value="batched">batched</option>
+              <option value="reference">reference</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label>
+            <input id="preparation-pipeline" v-model="preparationPipeline" type="checkbox" />
+            Preparation pipeline
+          </label>
+        </p>
+        <p>
+          <label for="thinking-mode">
+            Thinking
+            <select id="thinking-mode" v-model="thinkingMode">
+              <option value="disabled">disabled</option>
+              <option value="auto">auto</option>
+              <option value="required">required</option>
+            </select>
+          </label>
+        </p>
+        <p>
+          <label for="thinking-tokens">
+            Thinking token budget
+            <input id="thinking-tokens" v-model.number="thinkingTokens" type="number" min="1" />
+          </label>
+        </p>
+      </fieldset>
     </section>
 
     <section>
@@ -140,12 +262,28 @@ async function run(): Promise<void> {
         <button type="button" :disabled="busy || !loaded" @click="run">
           {{ running ? 'Running…' : 'Run Jet' }}
         </button>
+        <button type="button" :disabled="busy || !loaded" @click="runBatch">
+          Run Jet batch x2
+        </button>
+        <button type="button" :disabled="busy || !loaded" @click="runTrace">
+          Run Jet with trace
+        </button>
       </p>
     </section>
 
     <section v-if="responseText">
       <h2>DecisionResponse</h2>
       <pre>{{ responseText }}</pre>
+    </section>
+
+    <section v-if="timingsText">
+      <h2>EngineTimings</h2>
+      <pre>{{ timingsText }}</pre>
+    </section>
+
+    <section v-if="traceText">
+      <h2>EngineTrace</h2>
+      <pre>{{ traceText }}</pre>
     </section>
 
     <section v-if="errorText">

@@ -12,6 +12,8 @@ vulkan = ["jet-llama-sys/vulkan"]
 cuda = ["jet-llama-sys/cuda"]
 metal = ["jet-llama-sys/metal"]
 vision = ["jet-llama-sys/vision"]
+external-link = ["jet-llama-sys/external-link"]
+webgpu = ["jet-llama-sys/webgpu", "external-link"]
 
 [dependencies]
 jet-core.workspace = true

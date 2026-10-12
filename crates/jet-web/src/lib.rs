@@ -1,49 +1,95 @@
+use std::cell::RefCell;
+use std::ffi::{CStr, c_char};
+use std::path::PathBuf;
+
 use jet_core::{DecisionRequest, ErrorCode, JetError};
-use jet_decision::{ScoreResult, build_response, prepare_request};
-use js_sys::{Function, Promise, Reflect};
+use jet_engine::{Engine, EngineConfig, ExecutionMode, ThinkingConfig, ThinkingMode};
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
-#[derive(Serialize)]
-struct ScoreMessage<'a> {
-    role: &'static str,
-    content: &'a str,
-}
-
-#[derive(Serialize)]
-struct ScoreKnownTextsRequest<'a> {
-    messages: [ScoreMessage<'a>; 2],
-    targets: Vec<&'a str>,
-    template_kwargs: TemplateKwargs,
-}
-
-#[derive(Serialize)]
-struct ScoreKnownTextBatchRequest<'a> {
-    groups: Vec<ScoreKnownTextsRequest<'a>>,
-}
-
-#[derive(Serialize)]
-struct TemplateKwargs {
-    enable_thinking: bool,
+thread_local! {
+    static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
+    static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Deserialize)]
-struct KnownTextScore {
-    total_log_probability: f64,
-    target_token_count: usize,
+#[serde(deny_unknown_fields)]
+struct WebEngineConfig {
+    model_path: PathBuf,
+    model_id: String,
+    #[serde(default)]
+    gpu_layers: Option<u32>,
+    #[serde(default)]
+    cpu_moe_layers: u32,
+    // The wasm32 llama.cpp mmap loader does not complete with HeapFS model data.
+    #[serde(default)]
+    use_mmap: bool,
+    #[serde(default = "default_context_tokens")]
+    context_tokens_per_sequence: u32,
+    #[serde(default = "default_token_batch")]
+    token_batch: u32,
+    #[serde(default = "default_micro_batch")]
+    micro_batch: u32,
+    #[serde(default = "default_max_sequences")]
+    max_sequences: u32,
+    #[serde(default = "default_true")]
+    preparation_pipeline: bool,
+    #[serde(default = "default_max_output_rows")]
+    max_output_rows: u32,
+    #[serde(default = "default_threads")]
+    threads: i32,
+    #[serde(default)]
+    execution_mode: WebExecutionMode,
+    #[serde(default)]
+    thinking: WebThinkingConfig,
+    #[serde(default = "default_true")]
+    collect_timings: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WebExecutionMode {
+    Reference,
+    #[default]
+    Batched,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WebThinkingMode {
+    #[default]
+    Disabled,
+    Auto,
+    Required,
 }
 
 #[derive(Deserialize)]
-struct ScoreKnownTextsResponse {
-    scores: Vec<KnownTextScore>,
-    prompt_token_count: usize,
-    prefill_count: usize,
+#[serde(default, deny_unknown_fields)]
+struct WebThinkingConfig {
+    mode: WebThinkingMode,
+    max_tokens: u32,
+    temperature: f32,
+    top_k: i32,
+    top_p: f32,
+    seed: u32,
 }
 
-#[derive(Deserialize)]
-struct ScoreKnownTextBatchResponse {
-    groups: Vec<ScoreKnownTextsResponse>,
+impl Default for WebThinkingConfig {
+    fn default() -> Self {
+        let config = ThinkingConfig::default();
+        Self {
+            mode: WebThinkingMode::Disabled,
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            top_k: config.top_k,
+            top_p: config.top_p,
+            seed: config.seed,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Success {
+    success: bool,
 }
 
 #[derive(Serialize)]
@@ -52,125 +98,197 @@ struct WebError {
     message: String,
 }
 
-#[wasm_bindgen]
-pub async fn decide(
-    model_id: String,
-    request: JsValue,
-    score_known_texts: Function,
-) -> std::result::Result<JsValue, JsValue> {
-    let request: DecisionRequest = serde_wasm_bindgen::from_value(request)
-        .map_err(|error| web_error(JetError::InvalidRequest(error.to_string())))?;
-    let plans = prepare_request(&request).map_err(web_error)?;
-    let score_request = ScoreKnownTextBatchRequest {
-        groups: plans
-            .iter()
-            .map(|plan| ScoreKnownTextsRequest {
-                messages: [
-                    ScoreMessage {
-                        role: "system",
-                        content: jet_decision::SYSTEM_INSTRUCTION,
-                    },
-                    ScoreMessage {
-                        role: "user",
-                        content: &plan.user_content,
-                    },
-                ],
-                targets: plan
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate.target.as_str())
-                    .collect(),
-                template_kwargs: TemplateKwargs {
-                    enable_thinking: false,
-                },
+#[derive(Serialize)]
+struct ErrorEnvelope {
+    error: WebError,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BatchItem<T> {
+    Success { response: T },
+    Error { error: WebError },
+}
+
+const fn default_context_tokens() -> u32 {
+    1_024
+}
+
+const fn default_token_batch() -> u32 {
+    2_048
+}
+
+const fn default_micro_batch() -> u32 {
+    512
+}
+
+const fn default_max_sequences() -> u32 {
+    9
+}
+
+const fn default_max_output_rows() -> u32 {
+    256
+}
+
+fn default_threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|count| i32::try_from(count.get()).unwrap_or(i32::MAX))
+        .unwrap_or(1)
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl From<WebEngineConfig> for EngineConfig {
+    fn from(config: WebEngineConfig) -> Self {
+        let mut engine = Self::webgpu(config.model_path, config.model_id);
+        engine.gpu_layers = config.gpu_layers;
+        engine.cpu_moe_layers = config.cpu_moe_layers;
+        engine.use_mmap = config.use_mmap;
+        engine.context_tokens_per_sequence = config.context_tokens_per_sequence;
+        engine.token_batch = config.token_batch;
+        engine.micro_batch = config.micro_batch;
+        engine.max_sequences = config.max_sequences;
+        engine.preparation_pipeline = config.preparation_pipeline;
+        engine.max_output_rows = config.max_output_rows;
+        engine.threads = config.threads;
+        engine.execution_mode = match config.execution_mode {
+            WebExecutionMode::Reference => ExecutionMode::Reference,
+            WebExecutionMode::Batched => ExecutionMode::Batched,
+        };
+        engine.thinking = ThinkingConfig {
+            mode: match config.thinking.mode {
+                WebThinkingMode::Disabled => ThinkingMode::Disabled,
+                WebThinkingMode::Auto => ThinkingMode::Auto,
+                WebThinkingMode::Required => ThinkingMode::Required,
+            },
+            max_tokens: config.thinking.max_tokens,
+            temperature: config.thinking.temperature,
+            top_k: config.thinking.top_k,
+            top_p: config.thinking.top_p,
+            seed: config.thinking.seed,
+        };
+        engine.collect_timings = config.collect_timings;
+        engine
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Dispatch a JSON action from the browser worker.
+///
+/// # Safety
+///
+/// `action` and `request` must point to live NUL-terminated UTF-8 strings for the call.
+pub unsafe extern "C" fn jet_web_action(
+    action: *const c_char,
+    request: *const c_char,
+) -> *const u8 {
+    let result = action_result(action, request).unwrap_or_else(error_json);
+    OUTPUT.with(|output| {
+        let mut output = output.borrow_mut();
+        *output = result;
+        output.as_ptr()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jet_web_output_len() -> u32 {
+    OUTPUT.with(|output| u32::try_from(output.borrow().len()).unwrap_or(u32::MAX))
+}
+
+fn action_result(action: *const c_char, request: *const c_char) -> Result<Vec<u8>, JetError> {
+    if action.is_null() || request.is_null() {
+        return Err(JetError::InvalidRequest(
+            "action and request pointers must not be null".to_owned(),
+        ));
+    }
+    // SAFETY: the browser bridge passes live, NUL-terminated UTF-8 strings for this call.
+    let action = unsafe { CStr::from_ptr(action) }
+        .to_str()
+        .map_err(|error| JetError::InvalidRequest(error.to_string()))?;
+    // SAFETY: the browser bridge passes live, NUL-terminated UTF-8 strings for this call.
+    let request = unsafe { CStr::from_ptr(request) }
+        .to_str()
+        .map_err(|error| JetError::InvalidRequest(error.to_string()))?;
+
+    match action {
+        "load" => {
+            let config: WebEngineConfig = serde_json::from_str(request)?;
+            if config.use_mmap {
+                return Err(JetError::InvalidRequest(
+                    "use_mmap is not supported by the wasm32 HeapFS runtime".to_owned(),
+                ));
+            }
+            let engine = Engine::load(config.into())?;
+            ENGINE.with(|slot| *slot.borrow_mut() = Some(engine));
+            serde_json::to_vec(&Success { success: true }).map_err(Into::into)
+        }
+        "unload" => {
+            ENGINE.with(|slot| slot.borrow_mut().take());
+            serde_json::to_vec(&Success { success: true }).map_err(Into::into)
+        }
+        "decide" => {
+            let request: DecisionRequest = serde_json::from_str(request)?;
+            with_engine(|engine| {
+                let response = engine.decide(request)?;
+                serde_json::to_vec(&response).map_err(Into::into)
             })
-            .collect(),
-    };
-    let argument = serde_wasm_bindgen::to_value(&score_request)
-        .map_err(|error| web_error(JetError::NativeRuntime(error.to_string())))?;
-    let returned = score_known_texts
-        .call1(&JsValue::UNDEFINED, &argument)
-        .map_err(js_runtime_error)?;
-    let value = JsFuture::from(Promise::resolve(&returned))
-        .await
-        .map_err(js_runtime_error)?;
-    let scored: ScoreKnownTextBatchResponse = serde_wasm_bindgen::from_value(value)
-        .map_err(|error| web_error(JetError::NativeRuntime(error.to_string())))?;
-    if scored.groups.len() != plans.len() {
-        return Err(web_error(JetError::NativeRuntime(format!(
-            "scoreKnownTextBatch returned {} groups for {} questions",
-            scored.groups.len(),
-            plans.len()
-        ))));
+        }
+        "decide_trace" => {
+            let request: DecisionRequest = serde_json::from_str(request)?;
+            with_engine(|engine| {
+                let response = engine.decide_traced(request)?;
+                serde_json::to_vec(&response).map_err(Into::into)
+            })
+        }
+        "decide_batch" => {
+            let requests: Vec<DecisionRequest> = serde_json::from_str(request)?;
+            with_engine(|engine| {
+                let responses: Vec<BatchItem<_>> = engine
+                    .decide_batch(&requests)
+                    .into_iter()
+                    .map(|result| match result {
+                        Ok(response) => BatchItem::Success { response },
+                        Err(error) => BatchItem::Error {
+                            error: web_error(error),
+                        },
+                    })
+                    .collect();
+                serde_json::to_vec(&responses).map_err(Into::into)
+            })
+        }
+        "timings" => with_engine(|engine| serde_json::to_vec(engine.timings()).map_err(Into::into)),
+        _ => Err(JetError::InvalidRequest(format!(
+            "unknown Jet Web action `{action}`"
+        ))),
     }
-
-    let mut scores = Vec::with_capacity(plans.len());
-    for (plan, scored) in plans.iter().zip(scored.groups) {
-        if scored.scores.len() != plan.candidates.len() {
-            return Err(web_error(JetError::NativeRuntime(format!(
-                "scoreKnownTextBatch returned {} scores for {} candidates",
-                scored.scores.len(),
-                plan.candidates.len()
-            ))));
-        }
-        if scored.prefill_count == 0 {
-            return Err(web_error(JetError::NativeRuntime(
-                "scoreKnownTextBatch returned a zero prefill count".to_owned(),
-            )));
-        }
-
-        let mut log_probabilities = Vec::with_capacity(scored.scores.len());
-        let mut target_token_counts = Vec::with_capacity(scored.scores.len());
-        for score in scored.scores {
-            if score.total_log_probability.is_nan()
-                || score.total_log_probability == f64::INFINITY
-                || score.total_log_probability > 0.0
-            {
-                return Err(web_error(JetError::NonFiniteScore(format!(
-                    "scoreKnownTextBatch returned invalid total log-probability {}",
-                    score.total_log_probability
-                ))));
-            }
-            if score.target_token_count == 0 {
-                return Err(web_error(JetError::NativeRuntime(
-                    "scoreKnownTextBatch returned an empty target".to_owned(),
-                )));
-            }
-            log_probabilities.push(score.total_log_probability);
-            target_token_counts.push(score.target_token_count);
-        }
-
-        scores.push(ScoreResult {
-            log_probabilities,
-            prompt_tokens: scored.prompt_token_count,
-            thinking_tokens: 0,
-            target_token_counts,
-            prefill_count: scored.prefill_count,
-        });
-    }
-
-    let response = build_response(&model_id, &plans, &scores).map_err(web_error)?;
-    response
-        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(|error| web_error(JetError::NativeRuntime(error.to_string())))
 }
 
-fn js_runtime_error(value: JsValue) -> JsValue {
-    let message = value
-        .as_string()
-        .or_else(|| {
-            Reflect::get(&value, &JsValue::from_str("message"))
-                .ok()
-                .and_then(|message| message.as_string())
-        })
-        .unwrap_or_else(|| "wllama scoreKnownTextBatch failed".to_owned());
-    web_error(JetError::NativeRuntime(message))
+fn with_engine<T>(
+    callback: impl FnOnce(&mut Engine) -> Result<T, JetError>,
+) -> Result<T, JetError> {
+    ENGINE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let engine = slot
+            .as_mut()
+            .ok_or_else(|| JetError::NativeRuntime("load a model before running Jet".to_owned()))?;
+        callback(engine)
+    })
 }
 
-fn web_error(error: JetError) -> JsValue {
-    serde_wasm_bindgen::to_value(&WebError {
+fn error_json(error: JetError) -> Vec<u8> {
+    serde_json::to_vec(&ErrorEnvelope {
+        error: web_error(error),
+    })
+    .unwrap_or_else(|_| {
+        br#"{"error":{"code":"native_runtime","message":"failed to serialize error"}}"#.to_vec()
+    })
+}
+
+fn web_error(error: JetError) -> WebError {
+    WebError {
         code: error.code(),
         message: error.to_string(),
-    })
-    .unwrap_or_else(|_| JsValue::from_str(&error.to_string()))
+    }
 }
