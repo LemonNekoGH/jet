@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
-index a7ff36030..9be2799ae 100644
+index a7ff36030..87e9cee81 100644
 --- a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
 +++ b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
 @@ -41,7 +41,7 @@
@@ -31,8 +31,8 @@ index a7ff36030..9be2799ae 100644
          key.common.k_direct &= decisions.use_sg_matrix && key.common.k_type == GGML_TYPE_F16;
          key.common.v_direct &= decisions.use_sg_matrix && key.common.v_type == GGML_TYPE_F16;
 +#ifdef __EMSCRIPTEN__
-+        // Apple exposes an f32 8x8x8 subgroup-matrix configuration. Stage K/V
-+        // through f32 workgroup memory so attention keeps Jet's scoring accuracy.
++        // The Emscripten path selects an f32 subgroup-matrix configuration. Stage
++        // K/V through matching f32 workgroup memory to preserve scoring accuracy.
 +        key.common.k_direct = false;
 +        key.common.v_direct = false;
 +#endif
@@ -64,10 +64,43 @@ index a7ff36030..9be2799ae 100644
              defines.push_back(std::string("SG_MAT_N=") + std::to_string(context.sg_mat_n));
              defines.push_back(std::string("SG_MAT_K=") + std::to_string(context.sg_mat_k));
 diff --git a/ggml/src/ggml-webgpu/ggml-webgpu.cpp b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
-index 8b060c41a..b6ee150b6 100644
+index 8b060c41a..efceb9bf0 100644
 --- a/ggml/src/ggml-webgpu/ggml-webgpu.cpp
 +++ b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
-@@ -4033,6 +4033,13 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+@@ -10,14 +10,31 @@
+ #include "ggml-webgpu-shader-lib.hpp"
+ #include "ggml.h"
+
++#include <cstdint>
++
+ #ifdef __EMSCRIPTEN__
+ #    include <emscripten/emscripten.h>
++
++EM_JS(bool, ggml_webgpu_find_f32_subgroup_matrix_config,
++      (uintptr_t adapter_handle, uint32_t * m, uint32_t * n, uint32_t * k), {
++          const adapter = WebGPU.getJsObject(adapter_handle);
++          const configs = adapter?.info?.subgroupMatrixConfigs ?? [];
++          const config = configs.find(
++              candidate => candidate.componentType === "f32" && candidate.resultComponentType === "f32");
++          if (!config) {
++              return false;
++          }
++
++          HEAPU32[m >>> 2] = config.M;
++          HEAPU32[n >>> 2] = config.N;
++          HEAPU32[k >>> 2] = config.K;
++          return true;
++      })
+ #endif
+
+ #include <webgpu/webgpu_cpp.h>
+
+ #include <atomic>
+-#include <cstdint>
+ #include <cstring>
+ #ifdef GGML_WEBGPU_GPU_PROFILE
+ #    include <iomanip>
+@@ -4033,6 +4050,13 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
 
      ctx->webgpu_global_ctx->adapter.GetLimits(&ctx->webgpu_global_ctx->capabilities.limits);
 
@@ -81,30 +114,26 @@ index 8b060c41a..b6ee150b6 100644
      wgpu::AdapterInfo info{};
  #ifndef __EMSCRIPTEN__
      wgpu::AdapterPropertiesSubgroupMatrixConfigs subgroup_matrix_configs{};
-@@ -4051,7 +4058,21 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+@@ -4051,7 +4075,17 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
          wgpu::WGSLLanguageFeatureName::Packed4x8IntegerDotProduct);
 
      bool valid_subgroup_matrix_config = false;
 -#ifndef __EMSCRIPTEN__
 +#ifdef __EMSCRIPTEN__
-+    // Emdawn cannot expose subgroupMatrixConfigs yet, so only enable the
-+    // dimensions verified for Apple's Metal 3 adapter. Other adapters retain
-+    // the established WebGPU kernels until their dimensions can be queried.
-+    if (std::string(info.vendor) == "apple" && std::string(info.architecture) == "metal-3" &&
-+        ctx->webgpu_global_ctx->adapter.HasFeature(emscripten_subgroup_matrix_feature)) {
-+        // Chromium exposes the supported configurations through
-+        // GPUAdapterInfo.subgroupMatrixConfigs. Apple Metal 3 advertises the
-+        // f32 8x8x8 configuration used here.
-+        ctx->webgpu_global_ctx->capabilities.sg_mat_m = 8;
-+        ctx->webgpu_global_ctx->capabilities.sg_mat_n = 8;
-+        ctx->webgpu_global_ctx->capabilities.sg_mat_k = 8;
-+        valid_subgroup_matrix_config                  = true;
++    // Emdawn's C/C++ headers do not expose subgroupMatrixConfigs yet. Query the
++    // browser adapter directly and select a configuration compatible with the
++    // f32 subgroup-matrix shaders. Unsupported adapters retain the fallback.
++    if (ctx->webgpu_global_ctx->adapter.HasFeature(emscripten_subgroup_matrix_feature)) {
++        valid_subgroup_matrix_config = ggml_webgpu_find_f32_subgroup_matrix_config(
++            reinterpret_cast<uintptr_t>(ctx->webgpu_global_ctx->adapter.Get()),
++            &ctx->webgpu_global_ctx->capabilities.sg_mat_m, &ctx->webgpu_global_ctx->capabilities.sg_mat_n,
++            &ctx->webgpu_global_ctx->capabilities.sg_mat_k);
 +    }
 +#else
      // Accept f16 subgroup matrix configurations (square or non-square).
      // NVIDIA GPUs typically report square configs (e.g. 16x16x16),
      // while Intel Xe2 GPUs report non-square configs (e.g. 8x16x16).
-@@ -4084,6 +4105,10 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
+@@ -4084,6 +4118,10 @@ static void create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
      if (ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix) {
          required_features.push_back(wgpu::FeatureName::ChromiumExperimentalSubgroupMatrix);
      }
