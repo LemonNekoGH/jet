@@ -4,6 +4,7 @@ const repository = 'https://github.com/yet-another-ai/jet'
 
 export default defineConfig({
   title: 'Jet',
+  titleTemplate: ':title · Jet',
   description: 'Local structured decisions with language models',
   base: '/jet/',
   cleanUrls: true,
@@ -21,10 +22,20 @@ export default defineConfig({
     }],
     ['meta', { name: 'twitter:card', content: 'summary' }]
   ],
+  vite: {
+    // Keep Vue SFC resolution quiet for the custom landing theme.
+    server: {
+      fs: {
+        allow: ['..']
+      }
+    }
+  },
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Results', link: '/results' },
       { text: 'Advanced', link: '/advanced' },
+      { text: 'Get Jet', link: '/#get-jet' },
       { text: 'GitHub', link: repository }
     ],
     sidebar: [
@@ -39,6 +50,7 @@ export default defineConfig({
       {
         text: 'Reference',
         items: [
+          { text: 'Model comparison', link: '/results' },
           { text: 'Build and advanced usage', link: '/advanced' },
           { text: 'Continuous integration', link: '/ci' }
         ]
