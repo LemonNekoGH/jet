@@ -6,7 +6,7 @@ source_dir="$repo_root/target/wllama-playground-src"
 output_dir="$repo_root/playground/generated/wllama"
 legacy_output_dir="$repo_root/playground/generated/jet-web"
 patch_file="$repo_root/patches/wllama-jet-engine.patch"
-llama_patch_file="$repo_root/patches/llama-webgpu-subgroup-matrix.patch"
+llama_patch_file="$repo_root/patches/llama-webgpu-rmsnorm-workgroup.patch"
 wllama_commit=dbc42c093dfd911360be12064ac8575fc629faa7
 
 if [ ! -d "$source_dir/.git" ]; then
@@ -24,8 +24,8 @@ git -C "$source_dir" apply "$patch_file"
 mkdir -p "$source_dir/jet-llama.cpp"
 git -C "$repo_root/vendor/llama.cpp" archive HEAD | tar -x -C "$source_dir/jet-llama.cpp"
 git -C "$source_dir/jet-llama.cpp" init -q
-git -C "$source_dir/jet-llama.cpp" apply --check "$llama_patch_file"
-git -C "$source_dir/jet-llama.cpp" apply "$llama_patch_file"
+git -C "$source_dir/jet-llama.cpp" apply --unidiff-zero --check "$llama_patch_file"
+git -C "$source_dir/jet-llama.cpp" apply --unidiff-zero "$llama_patch_file"
 
 cd "$source_dir"
 npm ci
@@ -37,7 +37,6 @@ cargo +nightly build --manifest-path "$repo_root/Cargo.toml" \
   -Z build-std=std,panic_abort \
   --release
 SKIP_COMPAT=1 npm run build:wasm
-node "$repo_root/scripts/patch-wllama-webgpu.mjs" "$source_dir/src/wasm/wllama.js"
 npm run build
 
 rm -rf "$output_dir" "$legacy_output_dir"
