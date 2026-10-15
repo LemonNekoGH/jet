@@ -1,0 +1,3 @@
+/crates/jet-llama-sys/src/bindings_emscripten.rs linguist-generated=true
+/playground/pnpm-lock.yaml linguist-generated=true
+/playground/validation/*.json linguist-generated=true
