@@ -7,27 +7,10 @@ const wllamaWasmUrl = new URL(
 
 let model: Wllama | undefined;
 let loadedModelUrl: string | undefined;
-let loadedOptions: string | undefined;
 
 export type Progress = {
   loaded: number;
   total: number;
-};
-
-export type EngineOptions = {
-  contextTokensPerSequence?: number;
-  executionMode?: 'reference' | 'batched';
-  preparationPipeline?: boolean;
-  thinkingMode?: 'disabled' | 'auto' | 'required';
-  thinkingTokens?: number;
-};
-
-const defaultEngineOptions: Required<EngineOptions> = {
-  contextTokensPerSequence: 1024,
-  executionMode: 'batched',
-  preparationPipeline: true,
-  thinkingMode: 'disabled',
-  thinkingTokens: 256,
 };
 
 export function supportsWebGpu(): boolean {
@@ -37,21 +20,17 @@ export function supportsWebGpu(): boolean {
 export async function loadModel(
   modelUrl: string,
   onProgress: (progress: Progress) => void,
-  options: EngineOptions = {},
 ): Promise<void> {
   if (!supportsWebGpu()) {
     throw new Error('This browser does not expose WebGPU.');
   }
-  const engineOptions = { ...defaultEngineOptions, ...options };
-  const optionsKey = JSON.stringify(engineOptions);
-  if (model && loadedModelUrl === modelUrl && loadedOptions === optionsKey) {
+  if (model && loadedModelUrl === modelUrl) {
     return;
   }
   if (model) {
     await model.exit();
     model = undefined;
     loadedModelUrl = undefined;
-    loadedOptions = undefined;
   }
 
   const nextModel = new Wllama(
@@ -63,14 +42,14 @@ export async function loadModel(
     await nextModel.loadModelFromUrl(modelUrl, {
       jet: {
         model_id: modelId,
-        context_tokens_per_sequence: engineOptions.contextTokensPerSequence,
+        context_tokens_per_sequence: 1024,
         max_sequences: 9,
         max_output_rows: 256,
-        preparation_pipeline: engineOptions.preparationPipeline,
-        execution_mode: engineOptions.executionMode,
+        preparation_pipeline: true,
+        execution_mode: 'batched',
         thinking: {
-          mode: engineOptions.thinkingMode,
-          max_tokens: engineOptions.thinkingTokens,
+          mode: 'disabled',
+          max_tokens: 256,
         },
         collect_timings: true,
       },
@@ -82,7 +61,6 @@ export async function loadModel(
   }
   model = nextModel;
   loadedModelUrl = modelUrl;
-  loadedOptions = optionsKey;
 }
 
 export function isModelLoaded(modelUrl: string): boolean {
@@ -97,31 +75,4 @@ export async function runDecision(
     throw new Error('Load this model before running Jet.');
   }
   return model.jetDecide(request);
-}
-
-export async function runDecisionTrace(
-  modelUrl: string,
-  request: unknown,
-): Promise<unknown> {
-  if (!model || !isModelLoaded(modelUrl)) {
-    throw new Error('Load this model before running Jet.');
-  }
-  return model.jetDecideTrace(request);
-}
-
-export async function runDecisionBatch(
-  modelUrl: string,
-  requests: unknown[],
-): Promise<unknown[]> {
-  if (!model || !isModelLoaded(modelUrl)) {
-    throw new Error('Load this model before running Jet.');
-  }
-  return model.jetDecideBatch(requests);
-}
-
-export async function engineTimings(modelUrl: string): Promise<unknown> {
-  if (!model || !isModelLoaded(modelUrl)) {
-    throw new Error('Load this model before reading Jet timings.');
-  }
-  return model.jetTimings();
 }

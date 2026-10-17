@@ -132,10 +132,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "external-link on wasm32-unknown-emscripten requires the webgpu feature".into(),
                 );
             }
-            // The checked-in native bindings contain 64-bit layout tests.
-            // Select bindings generated against Emscripten's memory32 ABI.
+            // The native bindings contain 64-bit layout tests. Select bindings
+            // generated against Emscripten's memory32 ABI.
             #[cfg(not(feature = "generate-bindings"))]
-            fs::copy(&checked_emscripten_bindings, out_bindings)?;
+            {
+                if !checked_emscripten_bindings.is_file() {
+                    return Err(format!(
+                        "missing {}; run `mise run playground:bindings` or `sh scripts/generate-emscripten-bindings.sh` before building the WebGPU playground",
+                        checked_emscripten_bindings.display()
+                    )
+                    .into());
+                }
+                fs::copy(&checked_emscripten_bindings, out_bindings)?;
+            }
             #[cfg(feature = "generate-bindings")]
             {
                 let emscripten_sysroot = env::var("JET_EMSCRIPTEN_SYSROOT")?;

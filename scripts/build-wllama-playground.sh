@@ -27,6 +27,9 @@ git -C "$source_dir/jet-llama.cpp" init -q
 git -C "$source_dir/jet-llama.cpp" apply --unidiff-zero --check "$llama_patch_file"
 git -C "$source_dir/jet-llama.cpp" apply --unidiff-zero "$llama_patch_file"
 
+# The Emscripten bindings are generated locally and are not tracked.
+sh "$repo_root/scripts/generate-emscripten-bindings.sh"
+
 cd "$source_dir"
 npm ci
 export JET_REPO_ROOT="$repo_root"

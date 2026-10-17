@@ -23,9 +23,9 @@ jet-decision (the same Rust code as native Jet)
 DecisionResponse
 ```
 
-The module calls the original `Engine::decide` and `Engine::decide_batch` paths. Prompt rendering, combined prompt-plus-target tokenization, prefix validation, scheduling, cache reuse, thinking, probability checks, response construction, and timings stay in `jet-engine`. wllama supplies browser workers, model download/cache, HeapFS, and the TypeScript facade. It does not implement a second scorer.
+The module calls the original `Engine::decide` path. Prompt rendering, combined prompt-plus-target tokenization, prefix validation, scheduling, cache reuse, thinking, probability checks, response construction, and timings stay in `jet-engine`. wllama supplies browser workers, model download/cache, HeapFS, and the TypeScript facade. It does not implement a second scorer.
 
-The plain HTML controls expose the batched/reference execution mode, preparation pipeline, and disabled/auto/required thinking modes. **Run Jet with trace** records the actual rendered prompts, prompt token IDs, target suffix token IDs, and raw log probabilities from the same scoring call.
+The playground uses batched execution, the preparation pipeline, and disabled thinking. The request editor and the score view show the same `DecisionRequest` and `DecisionResponse` shapes as the native API.
 
 ## Build and run
 
@@ -36,7 +36,7 @@ mise install
 mise run playground:dev
 ```
 
-The first run clones the pinned wllama commit, applies `patches/wllama-jet-engine.patch`, compiles `jet-web` and Jet's vendored llama.cpp into one WebGPU Wasm module, and installs the frontend dependencies. Open the local URL printed by Vite, load the default Qwen3 GGUF, then select **Run Jet**.
+The first run clones the pinned wllama commit, applies `patches/wllama-jet-engine.patch`, compiles `jet-web` and Jet's vendored llama.cpp into one WebGPU Wasm module, and installs the frontend dependencies. Open the local URL printed by Vite, load the default Qwen3 GGUF, then select **Load & run**.
 
 Create a production bundle with:
 
@@ -46,7 +46,7 @@ mise run playground:build
 
 The generated wllama package and single Wasm file are under `playground/generated/`. The production output is under `playground/dist/`. Git ignores both directories.
 
-`jet-llama-sys` selects checked bindings generated for Emscripten's memory32 ABI when `webgpu` and `external-link` are enabled. The normal native build keeps its 64-bit bindings. Regenerate the browser bindings after changing the wrapper or vendored llama.cpp headers with:
+`jet-llama-sys` uses bindings generated for Emscripten's memory32 ABI when `webgpu` and `external-link` are enabled. The normal native build keeps its 64-bit bindings. The browser bindings are generated on demand and are not tracked; `playground:dev` and `playground:build` generate them before compiling the module. Regenerate them after changing the wrapper or vendored llama.cpp headers with:
 
 ```sh
 mise run playground:bindings
