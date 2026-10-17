@@ -36,3 +36,9 @@ export type ResultGroup = {
   question: string;
   options: ResultOption[];
 };
+
+let lastDraftId = 0;
+
+export function draftId(): string {
+  return `draft-${++lastDraftId}`;
+}
